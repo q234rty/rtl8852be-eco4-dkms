@@ -312,7 +312,7 @@ static int rtlbt_parse_config(struct hci_dev *hdev,
 
 load_fw:
 	rtl_dev_info(hdev, "config file: %s", filename);
-	ret = request_firmware(&fw, filename, &hdev->dev);
+	ret = firmware_request_nowarn(&fw, filename, &hdev->dev);
 	if (ret < 0) {
 		if (btrtl_dev->fw_type == FW_TYPE_V3_2) {
 			len = 4;
@@ -320,6 +320,8 @@ load_fw:
 			if (!cfg_buf)
 				return -ENOMEM;
 
+			rtl_dev_info(hdev, "config file: %s not found, use default",
+				     filename);
 			memset(cfg_buf, 0xff, len);
 			patch_image->cfg_buf = cfg_buf;
 			patch_image->cfg_len = len;
@@ -391,18 +393,18 @@ static int rtlbt_parse_section_v3(struct hci_dev *hdev,
 	patch_image_len = (u32)le64_to_cpu(hdr->patch_image_len);
 	chip_id = le16_to_cpu(hdr->chip_id);
 	image_id = le16_to_cpu(hdr->image_id);
-	rtl_dev_info(hdev, "image (%04x:%02x), chip id %u, cut 0x%02x, len %08zx"
+	rtl_dev_info(hdev, "subsection (%04x:%02x), chip id %u, cut 0x%02x, len %08zx"
 		     , image_id, hdr->index, chip_id, hdr->ic_cut,
 		     patch_image_len);
 
 	if (btrtl_dev->key_id != hdr->key_id) {
-		rtl_dev_info(hdev, "skip image, key_id mismatch (%u, %u)",
+		rtl_dev_info(hdev, "skip, key_id mismatch (%u, %u)",
 			    hdr->key_id, btrtl_dev->key_id);
 		return 0;
 	}
 
 	if (hdr->ic_cut != btrtl_dev->rom_version + 1) {
-		rtl_dev_info(hdev, "skip image, ic_cut mismatch (%u, %u)",
+		rtl_dev_info(hdev, "skip, ic_cut mismatch (%u, %u)",
 			    hdr->ic_cut, btrtl_dev->rom_version + 1);
 		return 0;
 	}
@@ -412,7 +414,7 @@ static int rtlbt_parse_section_v3(struct hci_dev *hdev,
 
 	if (btrtl_dev->fw_type == FW_TYPE_V3_2 &&
 	    chip_id != btrtl_dev->project_id) {
-		rtl_dev_info(hdev, "skip image, chip_id mismatch (%u, %d)", chip_id,
+		rtl_dev_info(hdev, "skip, chip_id mismatch (%u, %d)", chip_id,
 			    btrtl_dev->project_id);
 		return 0;
 	}
@@ -439,7 +441,7 @@ static int rtlbt_parse_section_v3(struct hci_dev *hdev,
 	patch_image->image_len = patch_image_len;
 
 	if (patch_image_len < 4) {
-		rtl_dev_err(hdev, "image payload too short (%zu)",
+		rtl_dev_err(hdev, "subsection payload too short (%zu)",
 			    patch_image_len);
 		ret = -EINVAL;
 		goto err;
@@ -453,7 +455,7 @@ static int rtlbt_parse_section_v3(struct hci_dev *hdev,
 	memcpy(patch_image->image_data, ptr, patch_image_len);
 	patch_image->image_ver =
 		get_unaligned_le32(ptr + patch_image->image_len - 4);
-	rtl_dev_info(hdev, "image version: %08x", patch_image->image_ver);
+	rtl_dev_info(hdev, "subsection version: %08x", patch_image->image_ver);
 
 	ret = rtlbt_parse_config(hdev, patch_image, btrtl_dev);
 	if (ret) {
@@ -497,8 +499,9 @@ int rtlbt_parse_firmware_v3(struct hci_dev *hdev,
 		return -EINVAL;
 	num_sections = le32_to_cpu(hdr->num_sections);
 
-	rtl_dev_dbg(hdev, "timpstamp %08x-%08x", *((u32 *)hdr->timestamp),
-		    *((u32 *)(hdr->timestamp + 4)));
+	rtl_dev_dbg(hdev, "timestamp %08x-%08x",
+		    get_unaligned_le32(hdr->timestamp),
+		    get_unaligned_le32(hdr->timestamp + 4));
 
 	for (i = 0; i < num_sections; i++) {
 		section = rtl_iov_pull_data(&iov, sizeof(*section));
@@ -528,12 +531,12 @@ int rtlbt_parse_firmware_v3(struct hci_dev *hdev,
 		if (rc < 0) {
 			rtl_dev_err(hdev, "Parse section (%u) err (%d)",
 				    opcode, rc);
-			continue;
+			return rc;
 		}
 		len += rc;
 	}
 
-	rtl_dev_info(hdev, "image payload total len: 0x%08x", len);
+	rtl_dev_info(hdev, "firmware section payload total len: 0x%08x", len);
 	if (!len) {
 		rtl_dev_err(hdev, "no matching firmware section found");
 		return -ENODATA;
@@ -657,7 +660,7 @@ static int rtl_security_check(struct hci_dev *hdev,
 	if (!image)
 		return 0;
 
-	rtl_dev_info(hdev, "sec image (%04x:%02x)", image->image_id,
+	rtl_dev_info(hdev, "sec subsection (%04x:%02x)", image->image_id,
 		     image->index);
 	val = image->fix[DL_FIX_PATCH_ADDR].value + image->image_len -
 					image->fix[DL_FIX_SEC_HDR_ADDR].value;
@@ -796,14 +799,3 @@ void btrtl_free_patch_images(struct btrtl_device_info *btrtl_dev)
 		kfree(image);
 	}
 }
-
-
-struct btrtl_enh_ops rtl_enh_ops = {
-	.parse_firmware_v3    = rtlbt_parse_firmware_v3,
-	.download_firmware_v3 = rtl_download_firmware_v3,
-	.free_patch_images    = btrtl_free_patch_images,
-};
-EXPORT_SYMBOL_GPL(rtl_enh_ops);
-
-MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Realtek Bluetooth firmware v3+ support");

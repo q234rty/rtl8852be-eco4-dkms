@@ -12,14 +12,6 @@
 #define rtl_dev_info(dev, fmt, ...) bt_dev_info(dev, "RTL: " fmt, ##__VA_ARGS__)
 #define rtl_dev_dbg(dev, fmt, ...) bt_dev_dbg(dev, "RTL: " fmt, ##__VA_ARGS__)
 
-#ifndef kzalloc_obj
-#define kzalloc_obj(obj) kzalloc(sizeof(obj), GFP_KERNEL)
-#endif
-#ifndef kmalloc_obj
-#define kmalloc_obj(obj) kmalloc(sizeof(obj), GFP_KERNEL)
-#endif
-
-
 #define RTL_VSC_OP_DOWNLOAD_CMD			0xfc20
 #define RTL_VSC_OP_READ_VENDER			0xfc61
 #define RTL_VSC_OP_WRITE_VENDOR			0xfc62
@@ -206,22 +198,7 @@ struct btrtl_device_info {
 	struct list_head patch_images;
 };
 
-struct btrtl_enh_ops {
-	int (*parse_firmware_v3)(struct hci_dev *hdev,
-				 struct btrtl_device_info *btrtl_dev);
-	int (*download_firmware_v3)(struct hci_dev *hdev,
-				    struct btrtl_device_info *btrtl_dev);
-	void (*free_patch_images)(struct btrtl_device_info *btrtl_dev);
-	int (*recv_event)(struct hci_dev *hdev, struct sk_buff *skb);
-};
-/* Symbol exported by btrtl_enh.ko for symbol_get/symbol_put */
-extern struct btrtl_enh_ops rtl_enh_ops;
-
-
-
-
-
-/* Internal functions shared between btrtl_core.c and btrtl_enh.c */
+/* Internal functions shared between btrtl.c and btrtl_enh.c */
 void btrtl_free_patch_images(struct btrtl_device_info *btrtl_dev);
 void *rtl_iov_pull_data(struct rtl_iovec *iov, u32 len);
 struct sk_buff *btrtl_read_local_version(struct hci_dev *hdev);
@@ -261,7 +238,8 @@ static inline struct btrtl_device_info *btrtl_initialize(struct hci_dev *hdev,
 
 static inline int btrtl_recv_event(struct hci_dev *hdev, struct sk_buff *skb)
 {
-	return -EOPNOTSUPP;
+	/* Must consume the skb: ownership was handed over by the caller. */
+	return hci_recv_frame(hdev, skb);
 }
 
 static inline void btrtl_free(struct btrtl_device_info *btrtl_dev)

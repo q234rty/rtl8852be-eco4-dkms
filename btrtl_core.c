@@ -592,7 +592,7 @@ static int rtlbt_parse_firmware_v2(struct hci_dev *hdev,
 			 * headers.
 			 */
 			if (!key_id)
-				break;
+				continue;
 			rc = btrtl_parse_section(hdev, btrtl_dev, opcode,
 						 ptr, section_len);
 			break;
@@ -601,8 +601,7 @@ static int rtlbt_parse_firmware_v2(struct hci_dev *hdev,
 						 ptr, section_len);
 			break;
 		default:
-			rc = 0;
-			break;
+			continue;
 		}
 		if (rc < 0) {
 			rtl_dev_err(hdev, "RTL: Parse section (%u) err %d",
@@ -680,21 +679,8 @@ static int rtlbt_parse_firmware(struct hci_dev *hdev,
 	if (btrtl_dev->fw_len <= 8)
 		return -EINVAL;
 
-	if (!memcmp(btrtl_dev->fw_data, RTL_EPATCH_SIGNATURE_V3, 8)) {
-		struct btrtl_enh_ops *ops = symbol_get(rtl_enh_ops);
-		int ret;
-
-		if (!ops)
-			return -EINVAL;
-
-		if (ops->parse_firmware_v3)
-			ret = ops->parse_firmware_v3(hdev, btrtl_dev);
-		else
-			ret = -EINVAL;
-
-		symbol_put(rtl_enh_ops);
-		return ret;
-	}
+	if (!memcmp(btrtl_dev->fw_data, RTL_EPATCH_SIGNATURE_V3, 8))
+		return rtlbt_parse_firmware_v3(hdev, btrtl_dev);
 
 	if (!memcmp(btrtl_dev->fw_data, RTL_EPATCH_SIGNATURE, 8))
 		min_size = sizeof(struct rtl_epatch_header) +
@@ -816,8 +802,8 @@ static int rtlbt_parse_firmware(struct hci_dev *hdev,
 
 	BT_DBG("length=%x offset=%x index %d", patch_length, patch_offset, i);
 	if (patch_length < sizeof(epatch_info->fw_version) ||
-	    check_add_overflow((size_t)patch_offset, (size_t)patch_length, &min_size) ||
-	    btrtl_dev->fw_len < min_size)
+	    patch_offset > btrtl_dev->fw_len ||
+	    patch_length > btrtl_dev->fw_len - patch_offset)
 		return -EINVAL;
 
 	/* Copy the firmware into a new buffer and write the version at
@@ -922,7 +908,7 @@ static int rtl_load_file(struct hci_dev *hdev, const char *name, u8 **buff)
 	int ret;
 
 	rtl_dev_info(hdev, "loading %s", name);
-	ret = request_firmware(&fw, name, &hdev->dev);
+	ret = firmware_request_nowarn(&fw, name, &hdev->dev);
 	if (ret < 0)
 		return ret;
 	ret = fw->size;
@@ -981,18 +967,7 @@ static int btrtl_setup_rtl8723b(struct hci_dev *hdev,
 	}
 
 	if (is_v3_fw(btrtl_dev->fw_type)) {
-		struct btrtl_enh_ops *ops = symbol_get(rtl_enh_ops);
-
-		if (!ops)
-			ret = -EOPNOTSUPP;
-		else if (ops->download_firmware_v3)
-			ret = ops->download_firmware_v3(hdev, btrtl_dev);
-		else
-			ret = -EOPNOTSUPP;
-
-		if (ops)
-			symbol_put(rtl_enh_ops);
-
+		ret = rtl_download_firmware_v3(hdev, btrtl_dev);
 		goto out;
 	}
 
@@ -1095,6 +1070,9 @@ void btrtl_free(struct btrtl_device_info *btrtl_dev)
 {
 	struct rtl_subsection *entry, *tmp;
 
+	if (!btrtl_dev)
+		return;
+
 	kvfree(btrtl_dev->fw_data);
 	kvfree(btrtl_dev->cfg_data);
 
@@ -1103,15 +1081,7 @@ void btrtl_free(struct btrtl_device_info *btrtl_dev)
 		kfree(entry);
 	}
 
-	if (btrtl_dev) {
-		struct btrtl_enh_ops *ops = symbol_get(rtl_enh_ops);
-
-		if (ops) {
-			if (ops->free_patch_images)
-				ops->free_patch_images(btrtl_dev);
-			symbol_put(rtl_enh_ops);
-		}
-	}
+	btrtl_free_patch_images(btrtl_dev);
 
 	kfree(btrtl_dev);
 }
@@ -1251,6 +1221,9 @@ next:
 		goto err_free;
 	}
 
+	/* The DA4 key id register only exists starting from 8922A, so older
+	 * chips below CHIP_ID_V3_BASE other than 8922A are skipped here.
+	 */
 	if (btrtl_dev->project_id >= CHIP_ID_V3_BASE) {
 		rc = btrtl_vendor_read_reg16(hdev, RTL_SEC_PROJ_V3, reg_val);
 		if (rc < 0)
@@ -1306,6 +1279,9 @@ next:
 			if (!ret)
 				ret = -EINVAL;
 			goto err_free;
+		} else if (btrtl_dev->cfg_len <= 0) {
+			rtl_dev_info(hdev, "config file %s.bin not found, ignored",
+				     btrtl_dev->ic_info->cfg_name);
 		}
 	}
 
@@ -1584,10 +1560,6 @@ int btrtl_get_uart_settings(struct hci_dev *hdev,
 }
 EXPORT_SYMBOL_GPL(btrtl_get_uart_settings);
 
-MODULE_AUTHOR("Daniel Drake <drake@endlessm.com>");
-MODULE_DESCRIPTION("Bluetooth support for Realtek devices ver " VERSION);
-MODULE_VERSION(VERSION);
-
 
 int btrtl_recv_event(struct hci_dev *hdev, struct sk_buff *skb)
 {
@@ -1617,8 +1589,10 @@ out:
 }
 EXPORT_SYMBOL_GPL(btrtl_recv_event);
 
+MODULE_AUTHOR("Daniel Drake <drake@endlessm.com>");
+MODULE_DESCRIPTION("Bluetooth support for Realtek devices ver " VERSION);
+MODULE_VERSION(VERSION);
 MODULE_LICENSE("GPL");
-MODULE_SOFTDEP("post: btrtl_enh");
 MODULE_FIRMWARE("rtl_bt/rtl8723a_fw.bin");
 MODULE_FIRMWARE("rtl_bt/rtl8723b_fw.bin");
 MODULE_FIRMWARE("rtl_bt/rtl8723b_config.bin");
